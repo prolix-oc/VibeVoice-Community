@@ -33,7 +33,7 @@ The model can synthesize speech up to **90 minutes** long with up to **4 distinc
 
 ### 🔥 News
 
-- **[2025-08-26] 🎉 We Open Source the [VibeVoice-Large](https://huggingface.co/microsoft/VibeVoice-Large) model weights!**
+- **[2025-08-26] 🎉 We Open Source the [VibeVoice-Large](https://huggingface.co/aoi-ot/VibeVoice-Large) model weights!**
 - **[2025-08-28] 🎉 We provide a [Colab](https://colab.research.google.com/github/akadoubleone/VibeVoice-Community/blob/main/demo/VibeVoice_colab.ipynb) script for easy access to our model. Due to GPU memory limitations, only VibeVoice-1.5B is supported.**
 
 ### 📋 TODO
@@ -97,7 +97,7 @@ Try it on [Colab](https://colab.research.google.com/github/akadoubleone/VibeVoic
 |-------|----------------|----------|----------|
 | VibeVoice-0.5B-Streaming | - | - | On the way |
 | VibeVoice-1.5B | 64K | ~90 min | [HF link](https://huggingface.co/microsoft/VibeVoice-1.5B) |
-| VibeVoice-Large| 32K | ~45 min | [HF link](https://huggingface.co/microsoft/VibeVoice-Large) |
+| VibeVoice-Large| 32K | ~45 min | [HF link](https://huggingface.co/aoi-ot/VibeVoice-Large) |
 
 ## Installation
 We recommend to use NVIDIA Deep Learning Container to manage the CUDA environment. 
@@ -140,17 +140,17 @@ apt update && apt install ffmpeg -y # for demo
 python demo/gradio_demo.py --model_path microsoft/VibeVoice-1.5B --share
 
 # For Large model
-python demo/gradio_demo.py --model_path microsoft/VibeVoice-Large --share
+python demo/gradio_demo.py --model_path aoi-ot/VibeVoice-Large --share
 ```
 
 ### Usage 2: Inference from files directly
 ```bash
 # We provide some LLM generated example scripts under demo/text_examples/ for demo
 # 1 speaker
-python demo/inference_from_file.py --model_path microsoft/VibeVoice-Large --txt_path demo/text_examples/1p_abs.txt --speaker_names Alice
+python demo/inference_from_file.py --model_path aoi-ot/VibeVoice-Large --txt_path demo/text_examples/1p_abs.txt --speaker_names Alice
 
 # or more speakers
-python demo/inference_from_file.py --model_path microsoft/VibeVoice-Large --txt_path demo/text_examples/2p_music.txt --speaker_names Alice Frank
+python demo/inference_from_file.py --model_path aoi-ot/VibeVoice-Large --txt_path demo/text_examples/2p_music.txt --speaker_names Alice Frank
 ```
 
 ## FAQ
