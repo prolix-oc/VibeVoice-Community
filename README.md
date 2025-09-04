@@ -4,7 +4,7 @@
 [![Project Page](https://img.shields.io/badge/Project-Page-blue?logo=microsoft)](https://microsoft.github.io/VibeVoice)
 [![Hugging Face](https://img.shields.io/badge/HuggingFace-Collection-orange?logo=huggingface)](https://huggingface.co/collections/microsoft/vibevoice-68a2ef24a875c44be47b034f)
 [![Technical Report](https://img.shields.io/badge/Technical-Report-red?logo=adobeacrobatreader)](https://arxiv.org/pdf/2508.19205)
-[![Colab](https://img.shields.io/badge/Run-Colab-orange?logo=googlecolab)](https://colab.research.google.com/github/microsoft/VibeVoice/blob/main/demo/VibeVoice_colab.ipynb)
+[![Colab](https://img.shields.io/badge/Run-Colab-orange?logo=googlecolab)](https://colab.research.google.com/github/akadoubleone/VibeVoice-Community/blob/main/demo/VibeVoice_colab.ipynb)
 [![Live Playground](https://img.shields.io/badge/Live-Playground-green?logo=gradio)](https://aka.ms/VibeVoice-Demo)
 
 </div>
@@ -34,7 +34,7 @@ The model can synthesize speech up to **90 minutes** long with up to **4 distinc
 ### 🔥 News
 
 - **[2025-08-26] 🎉 We Open Source the [VibeVoice-Large](https://huggingface.co/microsoft/VibeVoice-Large) model weights!**
-- **[2025-08-28] 🎉 We provide a [Colab](https://colab.research.google.com/github/microsoft/VibeVoice/blob/main/demo/VibeVoice_colab.ipynb) script for easy access to our model. Due to GPU memory limitations, only VibeVoice-1.5B is supported.**
+- **[2025-08-28] 🎉 We provide a [Colab](https://colab.research.google.com/github/akadoubleone/VibeVoice-Community/blob/main/demo/VibeVoice_colab.ipynb) script for easy access to our model. Due to GPU memory limitations, only VibeVoice-1.5B is supported.**
 
 ### 📋 TODO
 
@@ -88,7 +88,7 @@ https://github.com/user-attachments/assets/a357c4b6-9768-495c-a576-1618f6275727
 
 For more examples, see the [Project Page](https://microsoft.github.io/VibeVoice).
 
-Try it on [Colab](https://colab.research.google.com/github/microsoft/VibeVoice/blob/main/demo/VibeVoice_colab.ipynb) or [Demo](https://aka.ms/VibeVoice-Demo).
+Try it on [Colab](https://colab.research.google.com/github/akadoubleone/VibeVoice-Community/blob/main/demo/VibeVoice_colab.ipynb) or [Demo](https://aka.ms/VibeVoice-Demo).
 
 
 
