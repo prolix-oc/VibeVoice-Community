@@ -9,12 +9,12 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Iterator
 from datetime import datetime
 import threading
 import numpy as np
 import gradio as gr
 import librosa
+import resampy
 import soundfile as sf
 import torch
 import os
@@ -23,6 +23,7 @@ import traceback
 from vibevoice.modular.configuration_vibevoice import VibeVoiceConfig
 from vibevoice.modular.modeling_vibevoice_inference import VibeVoiceForConditionalGenerationInference
 from vibevoice.processor.vibevoice_processor import VibeVoiceProcessor
+from vibevoice.processor.vibevoice_tokenizer_processor import AudioNormalizer
 from vibevoice.modular.streamer import AudioStreamer
 from transformers.utils import logging
 from transformers import set_seed
@@ -32,7 +33,7 @@ logger = logging.get_logger(__name__)
 
 
 class VibeVoiceDemo:
-    def __init__(self, model_path: str, device: str = "cuda", inference_steps: int = 5):
+    def __init__(self, model_path, device="cuda", inference_steps=5):
         """Initialize the VibeVoice demo with model loading."""
         self.model_path = model_path
         self.device = device
@@ -43,6 +44,10 @@ class VibeVoiceDemo:
         self.load_model()
         self.setup_voice_presets()
         self.load_example_scripts()  # Load example scripts
+        
+        # Streaming optimization parameters
+        self.streaming_min_yield_interval = 30  # Seconds between streaming updates
+        self.streaming_min_chunk_size_multiplier = 60  # Multiplier for minimum chunk size
         
     def load_model(self):
         """Load the VibeVoice model and processor."""
@@ -162,27 +167,34 @@ class VibeVoiceDemo:
         print(f"Found {len(self.available_voices)} voice files in {voices_dir}")
         print(f"Available voices: {', '.join(self.available_voices.keys())}")
     
-    def read_audio(self, audio_path: str, target_sr: int = 24000) -> np.ndarray:
+    def read_audio(self, audio_path, target_sr=24000):
         """Read and preprocess audio file."""
         try:
             wav, sr = sf.read(audio_path)
             if len(wav.shape) > 1:
                 wav = np.mean(wav, axis=1)
             if sr != target_sr:
-                wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+                # Use resampy with high-quality Kaiser best resampling if available
+                try:
+                    import resampy
+                    wav = resampy.resample(wav, sr, target_sr, filter='kaiser_best')
+                except ImportError:
+                    # Fallback to librosa if resampy is not available
+                    wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
             return wav
         except Exception as e:
             print(f"Error reading audio {audio_path}: {e}")
             return np.array([])
     
     def generate_podcast_streaming(self, 
-                                 num_speakers: int,
-                                 script: str,
-                                 speaker_1: str = None,
-                                 speaker_2: str = None,
-                                 speaker_3: str = None,
-                                 speaker_4: str = None,
-                                 cfg_scale: float = 1.3) -> Iterator[tuple]:
+                                 num_speakers,
+                                 script,
+                                 speaker_1=None,
+                                 speaker_2=None,
+                                 speaker_3=None,
+                                 speaker_4=None,
+                                 cfg_scale=1.3,
+                                 **generation_params):
         try:
             
             # Reset stop flag and set generating state
@@ -212,7 +224,8 @@ class VibeVoiceDemo:
             
             # Build initial log
             log = f"🎙️ Generating podcast with {num_speakers} speakers\n"
-            log += f"📊 Parameters: CFG Scale={cfg_scale}, Inference Steps={self.inference_steps}\n"
+            log += f"📊 Parameters: CFG Scale={cfg_scale}, Inference Steps={self.model.ddpm_inference_steps}\n"
+            log += f"⏱️ Streaming: Interval={self.streaming_min_yield_interval}s, Chunk Multiplier={self.streaming_min_chunk_size_multiplier}\n"
             log += f"🎭 Speakers: {', '.join(selected_speakers)}\n"
             
             # Check for stop signal
@@ -230,14 +243,6 @@ class VibeVoiceDemo:
                     self.is_generating = False
                     raise gr.Error(f"Error: Failed to load audio for {speaker_name}")
                 voice_samples.append(audio_data)
-            
-            # log += f"✅ Loaded {len(voice_samples)} voice samples\n"
-            
-            # Check for stop signal
-            if self.stop_generation:
-                self.is_generating = False
-                yield None, "🛑 Generation stopped by user", gr.update(visible=False)
-                return
             
             # Parse script to assign speaker ID's
             lines = script.strip().split('\n')
@@ -275,6 +280,7 @@ class VibeVoiceDemo:
                 return_tensors="pt",
                 return_attention_mask=True,
             )
+            
             # Move tensors to device
             target_device = self.device if self.device in ("cuda", "mps") else "cpu"
             for k, v in inputs.items():
@@ -299,7 +305,7 @@ class VibeVoiceDemo:
             generation_thread.start()
             
             # Wait for generation to actually start producing audio
-            time.sleep(1)  # Reduced from 3 to 1 second
+            time.sleep(0.1)  # Minimal wait time to reduce overhead
 
             # Check for stop signal after thread start
             if self.stop_generation:
@@ -315,8 +321,8 @@ class VibeVoiceDemo:
             pending_chunks = []  # Buffer for accumulating small chunks
             chunk_count = 0
             last_yield_time = time.time()
-            min_yield_interval = 15 # Yield every 15 seconds
-            min_chunk_size = sample_rate * 30 # At least 2 seconds of audio
+            min_yield_interval = self.streaming_min_yield_interval  # Use optimized parameter
+            min_chunk_size = sample_rate * self.streaming_min_chunk_size_multiplier  # Use optimized parameter
             
             # Get the stream for the first (and only) sample
             audio_stream = audio_streamer.get_stream(0)
@@ -394,7 +400,7 @@ class VibeVoiceDemo:
                 has_yielded_audio = True  # Mark that we yielded audio
             
             # Wait for generation to complete (with timeout to prevent hanging)
-            generation_thread.join(timeout=5.0)  # Increased timeout to 5 seconds
+            generation_thread.join(timeout=1.0)  # Minimal timeout to reduce overhead
 
             # If thread is still alive after timeout, force end
             if generation_thread.is_alive():
@@ -569,7 +575,7 @@ class VibeVoiceDemo:
         else:
             print("No example scripts were loaded")
     
-    def _get_num_speakers_from_script(self, script: str) -> int:
+    def _get_num_speakers_from_script(self, script):
         """Determine the number of unique speakers in a script."""
         import re
         speakers = set()
@@ -598,25 +604,105 @@ class VibeVoiceDemo:
             return len(speakers)
     
 
-def create_demo_interface(demo_instance: VibeVoiceDemo):
+def create_demo_interface(demo_instance):
     """Create the Gradio interface with streaming support."""
     
-    # Custom CSS for high-end aesthetics with lighter theme
+    # Custom CSS for high-end aesthetics with both light and dark mode support
     custom_css = """
-    /* Modern light theme with gradients */
+    /* Base theme variables */
+    :root {
+        --background-primary: #f8fafc;
+        --background-secondary: #e2e8f0;
+        --background-card: rgba(255, 255, 255, 0.8);
+        --border-color: rgba(226, 232, 240, 0.8);
+        --text-primary: #1e293b;
+        --text-secondary: #374151;
+        --header-gradient-start: #667eea;
+        --header-gradient-end: #764ba2;
+        --card-gradient-start: #e2e8f0;
+        --card-gradient-end: #cbd5e1;
+        --button-gradient-green-start: #059669;
+        --button-gradient-green-end: #0d9488;
+        --button-gradient-red-start: #ef4444;
+        --button-gradient-red-end: #dc2626;
+        --button-gradient-gray-start: #64748b;
+        --button-gradient-gray-end: #475569;
+        --audio-player-bg: #f1f5f9;
+        --audio-player-bg-end: #e2e8f0;
+        --complete-audio-bg: #f0fdf4;
+        --complete-audio-bg-end: #dcfce7;
+        --queue-status-bg: #f0f9ff;
+        --queue-status-bg-end: #e0f2fe;
+    }
+    
+    /* Dark mode variables */
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --background-primary: #0f172a;
+            --background-secondary: #1e293b;
+            --background-card: rgba(30, 41, 59, 0.8);
+            --border-color: rgba(51, 65, 85, 0.8);
+            --text-primary: #f1f5f9;
+            --text-secondary: #e2e8f0;
+            --header-gradient-start: #4f46e5;
+            --header-gradient-end: #7c3aed;
+            --card-gradient-start: #334155;
+            --card-gradient-end: #1e293b;
+            --button-gradient-green-start: #10b981;
+            --button-gradient-green-end: #0d9488;
+            --button-gradient-red-start: #f87171;
+            --button-gradient-red-end: #ef4444;
+            --button-gradient-gray-start: #94a3b8;
+            --button-gradient-gray-end: #64748b;
+            --audio-player-bg: #1e293b;
+            --audio-player-bg-end: #334155;
+            --complete-audio-bg: #065f46;
+            --complete-audio-bg-end: #047857;
+            --queue-status-bg: #0c4a6e;
+            --queue-status-bg-end: #0369a1;
+        }
+    }
+    
+    /* Gradio dark theme override */
+    .dark {
+        --background-primary: #0f172a;
+        --background-secondary: #1e293b;
+        --background-card: rgba(30, 41, 59, 0.8);
+        --border-color: rgba(51, 65, 85, 0.8);
+        --text-primary: #f1f5f9;
+        --text-secondary: #e2e8f0;
+        --header-gradient-start: #4f46e5;
+        --header-gradient-end: #7c3aed;
+        --card-gradient-start: #334155;
+        --card-gradient-end: #1e293b;
+        --button-gradient-green-start: #10b981;
+        --button-gradient-green-end: #0d9488;
+        --button-gradient-red-start: #f87171;
+        --button-gradient-red-end: #ef4444;
+        --button-gradient-gray-start: #94a3b8;
+        --button-gradient-gray-end: #64748b;
+        --audio-player-bg: #1e293b;
+        --audio-player-bg-end: #334155;
+        --complete-audio-bg: #065f46;
+        --complete-audio-bg-end: #047857;
+        --queue-status-bg: #0c4a6e;
+        --queue-status-bg-end: #0369a1;
+    }
+    
+    /* Main container */
     .gradio-container {
-        background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+        background: var(--background-primary);
         font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, sans-serif;
     }
     
-    /* Header styling */
+    /* Header styling - more unified appearance */
     .main-header {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        padding: 2rem;
-        border-radius: 20px;
+        background: linear-gradient(90deg, var(--header-gradient-start) 0%, var(--header-gradient-end) 100%);
+        padding: 2.25rem;
+        border-radius: 24px;
         margin-bottom: 2rem;
         text-align: center;
-        box-shadow: 0 10px 40px rgba(102, 126, 234, 0.3);
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
     }
     
     .main-header h1 {
@@ -624,7 +710,7 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
         font-size: 2.5rem;
         font-weight: 700;
         margin: 0;
-        text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        text-shadow: 0 1px 2px rgba(0,0,0,0.2);
     }
     
     .main-header p {
@@ -633,31 +719,118 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
         margin: 0.5rem 0 0 0;
     }
     
-    /* Card styling */
+    /* Card styling - more unified appearance */
     .settings-card, .generation-card {
-        background: rgba(255, 255, 255, 0.8);
-        backdrop-filter: blur(10px);
-        border: 1px solid rgba(226, 232, 240, 0.8);
-        border-radius: 16px;
-        padding: 1.5rem;
-        margin-bottom: 1rem;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        background: var(--background-card);
+        backdrop-filter: blur(12px);
+        border: 1px solid var(--border-color);
+        border-radius: 20px;
+        padding: 1.75rem;
+        margin-bottom: 1.25rem;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
     }
     
     /* Speaker selection styling */
     .speaker-grid {
         display: grid;
-        gap: 1rem;
-        margin-bottom: 1rem;
+        gap: 1.25rem;
+        margin-bottom: 1.25rem;
+        position: relative;
     }
     
     .speaker-item {
-        background: linear-gradient(135deg, #e2e8f0 0%, #cbd5e1 100%);
-        border: 1px solid rgba(148, 163, 184, 0.4);
-        border-radius: 12px;
-        padding: 1rem;
-        color: #374151;
+        background: linear-gradient(135deg, var(--card-gradient-start) 0%, var(--card-gradient-end) 100%);
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        border-radius: 16px;
+        padding: 1.25rem;
+        color: var(--text-secondary);
         font-weight: 500;
+        position: relative;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+    
+    /* Custom dropdown container */
+    .custom-dropdown-container {
+        position: relative;
+        width: 100%;
+    }
+    
+    /* Custom dropdown selector */
+    .custom-dropdown-selector {
+        background: var(--background-card);
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        padding: 0.75rem 1rem;
+        cursor: pointer;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+        transition: all 0.2s ease;
+        width: 100%;
+        font-family: inherit;
+        font-size: inherit;
+        color: var(--text-primary);
+    }
+    
+    .custom-dropdown-selector:hover {
+        border-color: rgba(148, 163, 184, 0.6);
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.12);
+    }
+    
+    .custom-dropdown-selector.active {
+        border-color: #667eea;
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.25);
+    }
+    
+    .custom-dropdown-arrow {
+        transition: transform 0.2s ease;
+        color: var(--text-secondary);
+    }
+    
+    .custom-dropdown-selector.active .custom-dropdown-arrow {
+        transform: rotate(180deg);
+    }
+    
+    /* Custom dropdown menu */
+    .custom-dropdown-menu {
+        position: fixed;
+        background: var(--background-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.15);
+        z-index: 10000;
+        max-height: 250px;
+        overflow-y: auto;
+        display: none;
+        min-width: 200px;
+    }
+    
+    .custom-dropdown-menu.show {
+        display: block;
+    }
+    
+    .custom-dropdown-option {
+        padding: 10px 16px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        color: var(--text-primary);
+        border-radius: 6px;
+        margin: 2px 4px;
+    }
+    
+    .custom-dropdown-option:hover {
+        background-color: rgba(148, 163, 184, 0.15);
+    }
+    
+    .custom-dropdown-option.selected {
+        background-color: rgba(102, 126, 234, 0.15);
+        font-weight: 500;
+    }
+    
+    /* Hidden Gradio dropdown */
+    .hidden-gradio-dropdown {
+        display: none !important;
     }
     
     /* Streaming indicator */
@@ -679,7 +852,7 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
     
     /* Queue status styling */
     .queue-status {
-        background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+        background: linear-gradient(135deg, var(--queue-status-bg) 0%, var(--queue-status-bg-end) 100%);
         border: 1px solid rgba(14, 165, 233, 0.3);
         border-radius: 8px;
         padding: 0.75rem;
@@ -689,43 +862,65 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
         color: #0369a1;
     }
     
+    /* Buttons */
     .generate-btn {
-        background: linear-gradient(135deg, #059669 0%, #0d9488 100%);
+        background: linear-gradient(135deg, var(--button-gradient-green-start) 0%, var(--button-gradient-green-end) 100%);
         border: none;
         border-radius: 12px;
         padding: 1rem 2rem;
         color: white;
         font-weight: 600;
         font-size: 1.1rem;
-        box-shadow: 0 4px 20px rgba(5, 150, 105, 0.4);
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
         transition: all 0.3s ease;
     }
     
     .generate-btn:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 25px rgba(5, 150, 105, 0.6);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
     }
     
     .stop-btn {
-        background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+        background: linear-gradient(135deg, var(--button-gradient-red-start) 0%, var(--button-gradient-red-end) 100%);
         border: none;
         border-radius: 12px;
         padding: 1rem 2rem;
         color: white;
         font-weight: 600;
         font-size: 1.1rem;
-        box-shadow: 0 4px 20px rgba(239, 68, 68, 0.4);
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
         transition: all 0.3s ease;
     }
     
     .stop-btn:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 25px rgba(239, 68, 68, 0.6);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    }
+    
+    .random-btn {
+        background: linear-gradient(135deg, var(--button-gradient-gray-start) 0%, var(--button-gradient-gray-end) 100%);
+        border: none;
+        border-radius: 12px;
+        padding: 1rem 1.5rem;
+        color: white;
+        font-weight: 600;
+        font-size: 1rem;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        transition: all 0.3s ease;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    
+    .random-btn:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+        background: linear-gradient(135deg, var(--button-gradient-gray-end) 0%, #334155 100%);
     }
     
     /* Audio player styling */
     .audio-output {
-        background: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%);
+        background: linear-gradient(135deg, var(--audio-player-bg) 0%, var(--audio-player-bg-end) 100%);
         border-radius: 16px;
         padding: 1.5rem;
         border: 1px solid rgba(148, 163, 184, 0.3);
@@ -734,28 +929,28 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
     .complete-audio-section {
         margin-top: 1rem;
         padding: 1rem;
-        background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+        background: linear-gradient(135deg, var(--complete-audio-bg) 0%, var(--complete-audio-bg-end) 100%);
         border: 1px solid rgba(34, 197, 94, 0.3);
         border-radius: 12px;
     }
     
     /* Text areas */
     .script-input, .log-output {
-        background: rgba(255, 255, 255, 0.9) !important;
-        border: 1px solid rgba(148, 163, 184, 0.4) !important;
+        background: var(--background-card) !important;
+        border: 1px solid var(--border-color) !important;
         border-radius: 12px !important;
-        color: #1e293b !important;
+        color: var(--text-primary) !important;
         font-family: 'JetBrains Mono', monospace !important;
     }
     
     .script-input::placeholder {
-        color: #64748b !important;
+        color: var(--text-secondary) !important;
     }
     
     /* Sliders */
     .slider-container {
-        background: rgba(248, 250, 252, 0.8);
-        border: 1px solid rgba(226, 232, 240, 0.6);
+        background: var(--background-card);
+        border: 1px solid var(--border-color);
         border-radius: 8px;
         padding: 1rem;
         margin: 0.5rem 0;
@@ -763,12 +958,12 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
     
     /* Labels and text */
     .gradio-container label {
-        color: #374151 !important;
+        color: var(--text-secondary) !important;
         font-weight: 600 !important;
     }
     
     .gradio-container .markdown {
-        color: #1f2937 !important;
+        color: var(--text-primary) !important;
     }
     
     /* Responsive design */
@@ -777,16 +972,79 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
         .settings-card, .generation-card { padding: 1rem; }
     }
     
-    /* Random example button styling - more subtle professional color */
+    /* Streaming indicator */
+    .streaming-indicator {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        background: #22c55e;
+        border-radius: 50%;
+        margin-right: 8px;
+        animation: pulse 1.5s infinite;
+    }
+    
+    @keyframes pulse {
+        0% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.5; transform: scale(1.1); }
+        100% { opacity: 1; transform: scale(1); }
+    }
+    
+    /* Queue status styling */
+    .queue-status {
+        background: linear-gradient(135deg, var(--queue-status-bg) 0%, var(--queue-status-bg-end) 100%);
+        border: 1px solid rgba(14, 165, 233, 0.3);
+        border-radius: 8px;
+        padding: 0.75rem;
+        margin: 0.5rem 0;
+        text-align: center;
+        font-size: 0.9rem;
+        color: #0369a1;
+    }
+    
+    /* Buttons */
+    .generate-btn {
+        background: linear-gradient(135deg, var(--button-gradient-green-start) 0%, var(--button-gradient-green-end) 100%);
+        border: none;
+        border-radius: 12px;
+        padding: 1rem 2rem;
+        color: white;
+        font-weight: 600;
+        font-size: 1.1rem;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        transition: all 0.3s ease;
+    }
+    
+    .generate-btn:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    }
+    
+    .stop-btn {
+        background: linear-gradient(135deg, var(--button-gradient-red-start) 0%, var(--button-gradient-red-end) 100%);
+        border: none;
+        border-radius: 12px;
+        padding: 1rem 2rem;
+        color: white;
+        font-weight: 600;
+        font-size: 1.1rem;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        transition: all 0.3s ease;
+    }
+    
+    .stop-btn:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    }
+    
     .random-btn {
-        background: linear-gradient(135deg, #64748b 0%, #475569 100%);
+        background: linear-gradient(135deg, var(--button-gradient-gray-start) 0%, var(--button-gradient-gray-end) 100%);
         border: none;
         border-radius: 12px;
         padding: 1rem 1.5rem;
         color: white;
         font-weight: 600;
         font-size: 1rem;
-        box-shadow: 0 4px 20px rgba(100, 116, 139, 0.3);
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
         transition: all 0.3s ease;
         display: inline-flex;
         align-items: center;
@@ -794,21 +1052,262 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
     }
     
     .random-btn:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 25px rgba(100, 116, 139, 0.4);
-        background: linear-gradient(135deg, #475569 0%, #334155 100%);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+        background: linear-gradient(135deg, var(--button-gradient-gray-end) 0%, #334155 100%);
+    }
+    
+    /* Audio player styling */
+    .audio-output {
+        background: linear-gradient(135deg, var(--audio-player-bg) 0%, var(--audio-player-bg-end) 100%);
+        border-radius: 16px;
+        padding: 1.5rem;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+    }
+    
+    .complete-audio-section {
+        margin-top: 1rem;
+        padding: 1rem;
+        background: linear-gradient(135deg, var(--complete-audio-bg) 0%, var(--complete-audio-bg-end) 100%);
+        border: 1px solid rgba(34, 197, 94, 0.3);
+        border-radius: 12px;
+    }
+    
+    /* Text areas */
+    .script-input, .log-output {
+        background: var(--background-card) !important;
+        border: 1px solid var(--border-color) !important;
+        border-radius: 12px !important;
+        color: var(--text-primary) !important;
+        font-family: 'JetBrains Mono', monospace !important;
+    }
+    
+    .script-input::placeholder {
+        color: var(--text-secondary) !important;
+    }
+    
+    /* Sliders */
+    .slider-container {
+        background: var(--background-card);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+    }
+    
+    /* Labels and text */
+    .gradio-container label {
+        color: var(--text-secondary) !important;
+        font-weight: 600 !important;
+    }
+    
+    .gradio-container .markdown {
+        color: var(--text-primary) !important;
+    }
+    
+    /* Responsive design */
+    @media (max-width: 768px) {
+        .main-header h1 { font-size: 2rem; }
+        .settings-card, .generation-card { padding: 1rem; }
+    }
+    """
+    
+    # JavaScript for custom dropdown functionality
+    custom_dropdown_js = """
+    function initializeCustomDropdowns() {
+        // Keep track of open dropdowns
+        let openDropdown = null;
+        
+        // Function to position dropdown menu
+        function positionDropdownMenu(selector, menu) {
+            const rect = selector.getBoundingClientRect();
+            const viewportWidth = window.innerWidth;
+            const viewportHeight = window.innerHeight;
+            
+            // Position menu 2px below selector
+            menu.style.left = rect.left + 'px';
+            menu.style.top = (rect.bottom + 2) + 'px';
+            menu.style.minWidth = rect.width + 'px';
+            
+            // Force reflow to get accurate dimensions
+            menu.offsetHeight;
+            
+            // Adjust if menu goes off right edge
+            if (rect.left + menu.offsetWidth > viewportWidth) {
+                menu.style.left = (viewportWidth - menu.offsetWidth - 10) + 'px';
+            }
+            
+            // Adjust if menu goes off bottom edge
+            if (rect.bottom + menu.offsetHeight > viewportHeight) {
+                menu.style.top = (rect.top - menu.offsetHeight - 2) + 'px';
+            }
+        }
+        
+        // Function to create custom dropdown
+        function createCustomDropdown(container, gradioDropdown) {
+            // Hide original Gradio dropdown
+            gradioDropdown.classList.add('hidden-gradio-dropdown');
+            
+            // Create custom dropdown container
+            const customContainer = document.createElement('div');
+            customContainer.className = 'custom-dropdown-container';
+            
+            // Create selector
+            const selector = document.createElement('div');
+            selector.className = 'custom-dropdown-selector';
+            
+            // Create selected text
+            const selectedText = document.createElement('span');
+            selectedText.className = 'custom-dropdown-selected';
+            
+            // Create arrow
+            const arrow = document.createElement('span');
+            arrow.className = 'custom-dropdown-arrow';
+            arrow.innerHTML = '▼';
+            
+            // Assemble selector
+            selector.appendChild(selectedText);
+            selector.appendChild(arrow);
+            
+            // Create menu
+            const menu = document.createElement('div');
+            menu.className = 'custom-dropdown-menu';
+            
+            // Get options from Gradio dropdown
+            const gradioOptions = gradioDropdown.querySelectorAll('ul.options li');
+            const options = [];
+            
+            gradioOptions.forEach((gradioOption, index) => {
+                const option = document.createElement('div');
+                option.className = 'custom-dropdown-option';
+                option.textContent = gradioOption.textContent;
+                option.dataset.value = gradioOption.dataset.value || gradioOption.textContent;
+                option.dataset.index = index;
+                
+                // Select first option by default
+                if (index === 0) {
+                    selectedText.textContent = gradioOption.textContent;
+                    option.classList.add('selected');
+                }
+                
+                // Add click handler
+                option.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    
+                    // Update selected text
+                    selectedText.textContent = this.textContent;
+                    
+                    // Update Gradio dropdown by triggering click on corresponding option
+                    gradioOptions[this.dataset.index].click();
+                    
+                    // Update selected class
+                    menu.querySelectorAll('.custom-dropdown-option').forEach(opt => {
+                        opt.classList.remove('selected');
+                    });
+                    this.classList.add('selected');
+                    
+                    // Close menu
+                    menu.classList.remove('show');
+                    selector.classList.remove('active');
+                    openDropdown = null;
+                });
+                
+                menu.appendChild(option);
+                options.push(option);
+            });
+            
+            // Add click handler to selector
+            selector.addEventListener('click', function(e) {
+                e.stopPropagation();
+                
+                // Close any other open dropdown
+                if (openDropdown && openDropdown !== menu) {
+                    openDropdown.classList.remove('show');
+                    openDropdown.previousElementSibling.classList.remove('active');
+                }
+                
+                // Toggle this dropdown
+                menu.classList.toggle('show');
+                selector.classList.toggle('active');
+                
+                if (menu.classList.contains('show')) {
+                    openDropdown = menu;
+                    positionDropdownMenu(selector, menu);
+                } else {
+                    openDropdown = null;
+                }
+            });
+            
+            // Assemble custom dropdown
+            customContainer.appendChild(selector);
+            customContainer.appendChild(menu);
+            
+            // Insert before Gradio dropdown
+            container.insertBefore(customContainer, gradioDropdown);
+        }
+        
+        // Initialize all speaker dropdowns
+        function initDropdowns() {
+            document.querySelectorAll('.speaker-item .gradio-dropdown').forEach(function(gradioDropdown) {
+                const container = gradioDropdown.parentElement;
+                if (container && !container.querySelector('.custom-dropdown-container')) {
+                    createCustomDropdown(container, gradioDropdown);
+                }
+            });
+        }
+        
+        // Try to initialize immediately and after a delay
+        initDropdowns();
+        setTimeout(initDropdowns, 500);
+        setTimeout(initDropdowns, 1000);
+        
+        // Also initialize when the DOM is updated
+        const observer = new MutationObserver(function(mutations) {
+            mutations.forEach(function(mutation) {
+                if (mutation.type === 'childList') {
+                    initDropdowns();
+                }
+            });
+        });
+        
+        observer.observe(document.body, { childList: true, subtree: true });
+        
+        // Close dropdowns when clicking outside
+        document.addEventListener('click', function(e) {
+            if (!e.target.closest('.custom-dropdown-selector') && !e.target.closest('.custom-dropdown-menu')) {
+                document.querySelectorAll('.custom-dropdown-menu.show').forEach(function(menu) {
+                    menu.classList.remove('show');
+                });
+                document.querySelectorAll('.custom-dropdown-selector.active').forEach(function(selector) {
+                    selector.classList.remove('active');
+                });
+                openDropdown = null;
+            }
+        });
+        
+        // Handle window resize
+        window.addEventListener('resize', function() {
+            document.querySelectorAll('.custom-dropdown-menu.show').forEach(function(menu) {
+                const selector = menu.previousElementSibling;
+                if (selector) {
+                    positionDropdownMenu(selector, menu);
+                }
+            });
+        });
+        
+        return 'Custom dropdowns initialized';
     }
     """
     
     with gr.Blocks(
         title="VibeVoice - AI Podcast Generator",
         css=custom_css,
-        theme=gr.themes.Soft(
-            primary_hue="blue",
-            secondary_hue="purple",
-            neutral_hue="slate",
-        )
+        theme=gr.themes.Default(),
+        js=custom_dropdown_js
     ) as interface:
+        
+        # Load the JavaScript function
+        interface.load(js="initializeCustomDropdowns")
         
         # Header
         gr.HTML("""
@@ -866,6 +1365,65 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                         # info="Higher values increase adherence to text",
                         elem_classes="slider-container"
                     )
+                    
+                    # Add inference steps parameter
+                    inference_steps = gr.Slider(
+                        minimum=1,
+                        maximum=20,
+                        value=5,
+                        step=1,
+                        label="Inference Steps",
+                        info="Number of DDPM steps (lower = faster, higher = better quality)",
+                        elem_classes="slider-container"
+                    )
+                    
+                    # Add streaming optimization parameters
+                    streaming_min_yield_interval = gr.Slider(
+                        minimum=5,
+                        maximum=60,
+                        value=30,
+                        step=5,
+                        label="Streaming Interval (seconds)",
+                        info="Time between streaming updates",
+                        elem_classes="slider-container"
+                    )
+                    
+                    streaming_min_chunk_size_multiplier = gr.Slider(
+                        minimum=30,
+                        maximum=120,
+                        value=60,
+                        step=10,
+                        label="Min Chunk Size Multiplier",
+                        info="Controls minimum audio chunk size for streaming",
+                        elem_classes="slider-container"
+                    )
+                    
+                    # Add audio processing parameters
+                    speech_tok_compress_ratio = gr.Slider(
+                        minimum=800,
+                        maximum=6400,
+                        value=3200,
+                        step=100,
+                        label="Speech Token Compression Ratio",
+                        info="Higher values = more compression, faster processing",
+                        elem_classes="slider-container"
+                    )
+                    
+                    target_dB_FS = gr.Slider(
+                        minimum=-30,
+                        maximum=-10,
+                        value=-18,
+                        step=1,
+                        label="Target dB FS (Volume Leveling)",
+                        info="Target volume level for audio normalization (-18 dB FS is default)",
+                        elem_classes="slider-container"
+                    )
+                    
+                    db_normalize = gr.Checkbox(
+                        label="Enable Audio Normalization",
+                        value=True,
+                        info="Normalize input audio volume levels"
+                    )
                 
             # Right column - Generation
             with gr.Column(scale=2, elem_classes="generation-card"):
@@ -875,8 +1433,8 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                     label="Conversation Script",
                     placeholder="""Enter your podcast script here. You can format it as:
 
-Speaker 1: Welcome to our podcast today!
-Speaker 2: Thanks for having me. I'm excited to discuss...
+Speaker 0: Welcome to our podcast today!
+Speaker 1: Thanks for having me. I'm excited to discuss...
 
 Or paste text directly and it will auto-assign speakers.""",
                     lines=12,
@@ -981,6 +1539,10 @@ Or paste text directly and it will auto-assign speakers.""",
             fn=update_speaker_visibility,
             inputs=[num_speakers],
             outputs=speaker_selections
+        ).then(
+            js="initializeCustomDropdowns",
+            inputs=[],
+            outputs=[]
         )
         
         # Main generation function with streaming
@@ -990,6 +1552,24 @@ Or paste text directly and it will auto-assign speakers.""",
                 # Extract speakers and parameters
                 speakers = speakers_and_params[:4]  # First 4 are speaker selections
                 cfg_scale = speakers_and_params[4]   # CFG scale
+                inference_steps = speakers_and_params[5]  # Inference steps
+                streaming_interval = speakers_and_params[6]  # Streaming interval
+                chunk_size_multiplier = speakers_and_params[7]  # Chunk size multiplier
+                compress_ratio = speakers_and_params[8]  # Compression ratio
+                target_db_fs = speakers_and_params[9]  # Target dB FS
+                normalize_audio = speakers_and_params[10]  # Audio normalization flag
+                
+                # Update demo instance with new parameters
+                demo_instance.model.set_ddpm_inference_steps(num_steps=inference_steps)
+                demo_instance.streaming_min_yield_interval = streaming_interval
+                demo_instance.streaming_min_chunk_size_multiplier = chunk_size_multiplier
+                
+                # Store parameters for use in generation (don't modify processor directly)
+                generation_params = {
+                    'compress_ratio': compress_ratio,
+                    'target_db_fs': target_db_fs,
+                    'normalize_audio': normalize_audio
+                }
                 
                 # Clear outputs and reset visibility at start
                 yield None, gr.update(value=None, visible=False), "🎙️ Starting generation...", gr.update(visible=True), gr.update(visible=False), gr.update(visible=True)
@@ -1004,7 +1584,8 @@ Or paste text directly and it will auto-assign speakers.""",
                     speaker_2=speakers[1],
                     speaker_3=speakers[2],
                     speaker_4=speakers[3],
-                    cfg_scale=cfg_scale
+                    cfg_scale=cfg_scale,
+                    **generation_params
                 ):
                     final_log = log
                     
@@ -1052,7 +1633,7 @@ Or paste text directly and it will auto-assign speakers.""",
             queue=False
         ).then(
             fn=generate_podcast_wrapper,
-            inputs=[num_speakers, script_input] + speaker_selections + [cfg_scale],
+            inputs=[num_speakers, script_input] + speaker_selections + [cfg_scale, inference_steps, streaming_min_yield_interval, streaming_min_chunk_size_multiplier, speech_tok_compress_ratio, target_dB_FS, db_normalize],
             outputs=[audio_output, complete_audio_output, log_output, streaming_status, generate_btn, stop_btn],
             queue=True  # Enable Gradio's built-in queue
         )
@@ -1185,6 +1766,18 @@ def parse_args():
         help="Number of inference steps for DDPM (not exposed to users)",
     )
     parser.add_argument(
+        "--streaming_min_yield_interval",
+        type=int,
+        default=30,
+        help="Minimum interval between streaming updates in seconds",
+    )
+    parser.add_argument(
+        "--streaming_min_chunk_size_multiplier",
+        type=int,
+        default=60,
+        help="Multiplier for minimum chunk size (sample_rate * multiplier)",
+    )
+    parser.add_argument(
         "--share",
         action="store_true",
         help="Share the demo publicly via Gradio",
@@ -1214,6 +1807,10 @@ def main():
         inference_steps=args.inference_steps
     )
     
+    # Set streaming optimization parameters
+    demo_instance.streaming_min_yield_interval = args.streaming_min_yield_interval
+    demo_instance.streaming_min_chunk_size_multiplier = args.streaming_min_chunk_size_multiplier
+    
     # Create interface
     interface = create_demo_interface(demo_instance)
     
@@ -1231,7 +1828,7 @@ def main():
         ).launch(
             share=args.share,
             # server_port=args.port,
-            server_name="0.0.0.0" if args.share else "127.0.0.1",
+            server_name="0.0.0.0",
             show_error=True,
             show_api=False  # Hide API docs for cleaner interface
         )

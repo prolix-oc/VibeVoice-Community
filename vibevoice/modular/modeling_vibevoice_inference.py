@@ -158,7 +158,10 @@ class VibeVoiceForConditionalGenerationInference(VibeVoicePreTrainedModel, Gener
                 acoustic_features = (acoustic_latents + self.model.speech_bias_factor.to(acoustic_latents.device)) * self.model.speech_scaling_factor.to(acoustic_latents.device)
                 
                 # Connect to language model space
-                acoustic_connected = self.model.acoustic_connector(acoustic_features)[speech_masks.cpu()]
+                acoustic_connector_output = self.model.acoustic_connector(acoustic_features)
+                
+                # Perform indexing (original working approach when shapes match)
+                acoustic_connected = acoustic_connector_output[speech_masks.cpu()]
                 
                 return acoustic_features, acoustic_connected
             elif speech_type == "pt":
@@ -169,7 +172,10 @@ class VibeVoiceForConditionalGenerationInference(VibeVoicePreTrainedModel, Gener
                 acoustic_features = (acoustic_latents + self.model.speech_bias_factor.to(acoustic_latents.device)) * self.model.speech_scaling_factor.to(acoustic_latents.device)
                 
                 # Connect to language model space
-                acoustic_connected = self.model.acoustic_connector(acoustic_features)[speech_masks.cpu()]
+                acoustic_connector_output = self.model.acoustic_connector(acoustic_features)
+                
+                # Perform indexing (original working approach when shapes match)
+                acoustic_connected = acoustic_connector_output[speech_masks.cpu()]
                 
                 return acoustic_features, acoustic_connected
             else:

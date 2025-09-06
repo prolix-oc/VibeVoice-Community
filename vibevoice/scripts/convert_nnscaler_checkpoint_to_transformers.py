@@ -95,14 +95,14 @@ def convert_vibevoice_nnscaler_checkpoint_to_hf(
     logger.info("Saving VibeVoiceProcessor configuration")
     processor_config = {
         "processor_class": "VibeVoiceProcessor",
-        "speech_tok_compress_ratio": 3200,
+        "speech_tok_compress_ratio": 1200,
         "db_normalize": True,
         # Audio processor configuration
         "audio_processor": {
             "feature_extractor_type": "VibeVoiceTokenizerProcessor",
             "sampling_rate": 24000,
             "normalize_audio": True,
-            "target_dB_FS": -25,
+            "target_dB_FS": -18,
             "eps": 1e-6,
         },
         "language_model_pretrained_name": pretrained_name,

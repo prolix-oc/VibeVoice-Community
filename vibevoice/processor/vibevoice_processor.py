@@ -56,38 +56,23 @@ class VibeVoiceProcessor:
         """
         import os
         import json
-        from transformers.utils import cached_file
         from .vibevoice_tokenizer_processor import VibeVoiceTokenizerProcessor
         from vibevoice.modular.modular_vibevoice_text_tokenizer import (
             VibeVoiceTextTokenizer, 
             VibeVoiceTextTokenizerFast
         )
         
-        # Try to load from local path first, then from HF hub
+        # Load processor configuration
         config_path = os.path.join(pretrained_model_name_or_path, "preprocessor_config.json")
-        config = None
-        
         if os.path.exists(config_path):
-            # Local path exists
             with open(config_path, 'r') as f:
                 config = json.load(f)
         else:
-            # Try to load from HF hub
-            try:
-                config_file = cached_file(
-                    pretrained_model_name_or_path,
-                    "preprocessor_config.json",
-                    **kwargs
-                )
-                with open(config_file, 'r') as f:
-                    config = json.load(f)
-            except Exception as e:
-                logger.warning(f"Could not load preprocessor_config.json from {pretrained_model_name_or_path}: {e}")
-                logger.warning("Using default configuration")
-                config = {
-                    "speech_tok_compress_ratio": 3200,
-                    "db_normalize": True,
-                }
+            logger.warning(f"No preprocessor_config.json found at {pretrained_model_name_or_path}, using defaults")
+            config = {
+                "speech_tok_compress_ratio": 3200,
+                "db_normalize": True,
+            }
         
         # Extract main processor parameters
         speech_tok_compress_ratio = config.get("speech_tok_compress_ratio", 3200)
@@ -111,7 +96,7 @@ class VibeVoiceProcessor:
             audio_processor = VibeVoiceTokenizerProcessor(
                 sampling_rate=audio_config.get("sampling_rate", 24000),
                 normalize_audio=audio_config.get("normalize_audio", True),
-                target_dB_FS=audio_config.get("target_dB_FS", -25),
+                target_dB_FS=audio_config.get("target_dB_FS", -18),
                 eps=audio_config.get("eps", 1e-6),
             )
         else:
@@ -149,7 +134,7 @@ class VibeVoiceProcessor:
                 "feature_extractor_type": "VibeVoiceTokenizerProcessor",
                 "sampling_rate": getattr(self.audio_processor, 'sampling_rate', 24000),
                 "normalize_audio": getattr(self.audio_processor, 'normalize_audio', True),
-                "target_dB_FS": getattr(self.audio_processor, 'target_dB_FS', -25),
+                "target_dB_FS": getattr(self.audio_processor, 'target_dB_FS', -18),
                 "eps": getattr(self.audio_processor, 'eps', 1e-6),
             }
         }
@@ -433,11 +418,10 @@ class VibeVoiceProcessor:
             if self.db_normalize and self.audio_normalizer:
                 wav = self.audio_normalizer(wav)
             
-            # Calculate token length based on compression ratio
-            # if speaker_audio.endswith('.pt') or speaker_audio.endswith('.npy'):
-            #     vae_tok_len = wav.shape[0]
-            # else:
-            vae_tok_len = math.ceil(wav.shape[0] / self.speech_tok_compress_ratio)
+            # Calculate token length based on model's actual compression ratio
+            # The acoustic tokenizer has a fixed compression ratio of 3200 based on its architecture
+            model_compress_ratio = 3200
+            vae_tok_len = math.ceil(wav.shape[0] / model_compress_ratio)
             
             # Build tokens and masks
             speaker_tokens = (prefix_tokens + 
@@ -480,9 +464,10 @@ class VibeVoiceProcessor:
         if not speech_inputs:
             return {"padded_speeches": None, "speech_masks": None}
         
-        # Calculate sequence lengths
-        vae_tok_seqlens = [math.ceil(s.shape[0] / self.speech_tok_compress_ratio) for s in speech_inputs]
-        # vae_tok_seqlens = [math.ceil(s.shape[0] / self.speech_tok_compress_ratio) if s.ndim == 1 else s.shape[0] for s in speech_inputs]
+        # Calculate sequence lengths based on model's actual compression ratio
+        # The acoustic tokenizer has a fixed compression ratio of 3200 based on its architecture
+        model_compress_ratio = 3200
+        vae_tok_seqlens = [math.ceil(s.shape[0] / model_compress_ratio) for s in speech_inputs]
         max_speech_length = max(s.shape[0] for s in speech_inputs)
         
         # Pad speeches

@@ -1,7 +1,6 @@
 import argparse
 import os
 import re
-import traceback
 from typing import List, Tuple, Union, Dict, Any
 import time
 import torch
@@ -167,8 +166,8 @@ def parse_args():
     parser.add_argument(
         "--device",
         type=str,
-        default=("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")),
-        help="Device for inference: cuda | mps | cpu",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device for tensor tests",
     )
     parser.add_argument(
         "--cfg_scale",
@@ -176,23 +175,39 @@ def parse_args():
         default=1.3,
         help="CFG (Classifier-Free Guidance) scale for generation (default: 1.3)",
     )
+    parser.add_argument(
+        "--inference_steps",
+        type=int,
+        default=5,
+        help="Number of inference steps for DDPM (lower = faster, but may reduce quality)",
+    )
+    parser.add_argument(
+        "--speech_tok_compress_ratio",
+        type=int,
+        default=1200,
+        help="Speech token compression ratio (higher = more compression, faster processing)",
+    )
+    parser.add_argument(
+        "--target_dB_FS",
+        type=float,
+        default=-18.0,
+        help="Target dB FS for audio normalization (-18 dB FS is default)",
+    )
+    parser.add_argument(
+        "--disable_audio_normalization",
+        action="store_true",
+        help="Disable audio normalization",
+    )
+    parser.add_argument(
+        "--disable_progress_bar",
+        action="store_true",
+        help="Disable progress bar to reduce overhead",
+    )
     
     return parser.parse_args()
 
 def main():
     args = parse_args()
-
-    # Normalize potential 'mpx' typo to 'mps'
-    if args.device.lower() == "mpx":
-        print("Note: device 'mpx' detected, treating it as 'mps'.")
-        args.device = "mps"
-
-    # Validate mps availability if requested
-    if args.device == "mps" and not torch.backends.mps.is_available():
-        print("Warning: MPS not available. Falling back to CPU.")
-        args.device = "cpu"
-
-    print(f"Using device: {args.device}")
 
     # Initialize voice mapper
     voice_mapper = VoiceMapper()
@@ -251,85 +266,39 @@ def main():
     
     # Prepare data for model
     full_script = '\n'.join(scripts)
-    full_script = full_script.replace("’", "'")        
     
+    # Load processor
     print(f"Loading processor & model from {args.model_path}")
     processor = VibeVoiceProcessor.from_pretrained(args.model_path)
+    
+    # Update processor with command-line parameters
+    processor.speech_tok_compress_ratio = args.speech_tok_compress_ratio
+    processor.db_normalize = not args.disable_audio_normalization
+    if processor.db_normalize and processor.audio_processor.normalizer:
+        processor.audio_processor.normalizer.target_dB_FS = args.target_dB_FS
 
-
-    # Decide dtype & attention implementation
-    if args.device == "mps":
-        load_dtype = torch.float32  # MPS requires float32
-        attn_impl_primary = "sdpa"  # flash_attention_2 not supported on MPS
-    elif args.device == "cuda":
-        load_dtype = torch.bfloat16
-        attn_impl_primary = "flash_attention_2"
-    else:  # cpu
-        load_dtype = torch.float32
-        attn_impl_primary = "sdpa"
-    print(f"Using device: {args.device}, torch_dtype: {load_dtype}, attn_implementation: {attn_impl_primary}")
-    # Load model with device-specific logic
-    try:
-        if args.device == "mps":
-            model = VibeVoiceForConditionalGenerationInference.from_pretrained(
-                args.model_path,
-                torch_dtype=load_dtype,
-                attn_implementation=attn_impl_primary,
-                device_map=None,  # load then move
-            )
-            model.to("mps")
-        elif args.device == "cuda":
-            model = VibeVoiceForConditionalGenerationInference.from_pretrained(
-                args.model_path,
-                torch_dtype=load_dtype,
-                device_map="cuda",
-                attn_implementation=attn_impl_primary,
-            )
-        else:  # cpu
-            model = VibeVoiceForConditionalGenerationInference.from_pretrained(
-                args.model_path,
-                torch_dtype=load_dtype,
-                device_map="cpu",
-                attn_implementation=attn_impl_primary,
-            )
-    except Exception as e:
-        if attn_impl_primary == 'flash_attention_2':
-            print(f"[ERROR] : {type(e).__name__}: {e}")
-            print(traceback.format_exc())
-            print("Error loading the model. Trying to use SDPA. However, note that only flash_attention_2 has been fully tested, and using SDPA may result in lower audio quality.")
-            model = VibeVoiceForConditionalGenerationInference.from_pretrained(
-                args.model_path,
-                torch_dtype=load_dtype,
-                device_map=(args.device if args.device in ("cuda", "cpu") else None),
-                attn_implementation='sdpa'
-            )
-            if args.device == "mps":
-                model.to("mps")
-        else:
-            raise e
-
+    # Load model
+    model = VibeVoiceForConditionalGenerationInference.from_pretrained(
+        args.model_path,
+        torch_dtype=torch.bfloat16,
+        device_map='cuda',
+        attn_implementation="flash_attention_2" # we only test flash_attention_2
+    )
 
     model.eval()
-    model.set_ddpm_inference_steps(num_steps=10)
+    model.set_ddpm_inference_steps(num_steps=args.inference_steps)
 
     if hasattr(model.model, 'language_model'):
        print(f"Language model attention: {model.model.language_model.config._attn_implementation}")
        
     # Prepare inputs for the model
     inputs = processor(
-        text=[full_script], # Wrap in list for batch processing
-        voice_samples=[voice_samples], # Wrap in list for batch processing
+        text=[full_script],  # Wrap in list for batch processing
+        voice_samples=[voice_samples],  # Wrap in list for batch processing
         padding=True,
         return_tensors="pt",
         return_attention_mask=True,
     )
-
-    # Move tensors to target device
-    target_device = args.device if args.device != "cpu" else "cpu"
-    for k, v in inputs.items():
-        if torch.is_tensor(v):
-            inputs[k] = v.to(target_device)
-
     print(f"Starting generation with cfg_scale: {args.cfg_scale}")
 
     # Generate audio
@@ -339,8 +308,10 @@ def main():
         max_new_tokens=None,
         cfg_scale=args.cfg_scale,
         tokenizer=processor.tokenizer,
+        # generation_config={'do_sample': False, 'temperature': 0.95, 'top_p': 0.95, 'top_k': 0},
         generation_config={'do_sample': False},
-        verbose=True,
+        verbose=False,  # Disable verbose output to reduce overhead
+        show_progress_bar=not args.disable_progress_bar,
     )
     generation_time = time.time() - start_time
     print(f"Generation time: {generation_time:.2f} seconds")
@@ -367,13 +338,13 @@ def main():
     print(f"Generated tokens: {generated_tokens}")
     print(f"Total tokens: {output_tokens}")
 
-    # Save output (processor handles device internally)
+    # Save output
     txt_filename = os.path.splitext(os.path.basename(args.txt_path))[0]
     output_path = os.path.join(args.output_dir, f"{txt_filename}_generated.wav")
     os.makedirs(args.output_dir, exist_ok=True)
     
     processor.save_audio(
-        outputs.speech_outputs[0], # First (and only) batch item
+        outputs.speech_outputs[0],  # First (and only) batch item
         output_path=output_path,
     )
     print(f"Saved output to {output_path}")

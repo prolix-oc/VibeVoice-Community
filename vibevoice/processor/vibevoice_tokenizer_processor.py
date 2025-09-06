@@ -24,12 +24,12 @@ class AudioNormalizer:
     for the VibeVoice tokenizer while maintaining audio quality.
     """
     
-    def __init__(self, target_dB_FS: float = -25, eps: float = 1e-6):
+    def __init__(self, target_dB_FS: float = -18, eps: float = 1e-6):
         """
         Initialize the audio normalizer.
         
         Args:
-            target_dB_FS (float): Target dB FS level for the audio. Default: -25
+            target_dB_FS (float): Target dB FS level for the audio. Default: -18
             eps (float): Small value to avoid division by zero. Default: 1e-6
         """
         self.target_dB_FS = target_dB_FS
@@ -100,7 +100,7 @@ class VibeVoiceTokenizerProcessor(FeatureExtractionMixin):
     Args:
         sampling_rate (int, optional): Expected sampling rate. Defaults to 24000.
         normalize_audio (bool, optional): Whether to normalize audio. Defaults to True.
-        target_dB_FS (float, optional): Target dB FS for normalization. Defaults to -25.
+        target_dB_FS (float, optional): Target dB FS for normalization. Defaults to -18.
         eps (float, optional): Small value for numerical stability. Defaults to 1e-6.
     """
     model_input_names = ["input_features"]
@@ -109,7 +109,7 @@ class VibeVoiceTokenizerProcessor(FeatureExtractionMixin):
         self,
         sampling_rate: int = 24000,
         normalize_audio: bool = True,
-        target_dB_FS: float = -25,
+        target_dB_FS: float = -18,
         eps: float = 1e-6,
         **kwargs,
     ):
